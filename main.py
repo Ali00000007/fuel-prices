@@ -1,5 +1,7 @@
+from datetime import datetime
 import os
 import time
+import sqlite3
 
 import requests
 from dotenv import load_dotenv
@@ -111,8 +113,37 @@ def show_prices(stations, fuel_type):
     results.sort()
     return results
 
+def save_results(results, fuel_type):
+    conn = sqlite3.connect("fuel.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS prices (
+                recorded_at TEXT,
+                station_name TEXT,
+                address TEXT,
+                postcode TEXT,
+                fuel_type TEXT,
+                price REAL
+            )
+""")
+    time_now = datetime.now().isoformat()
+    for price, address, postcode, name in results:
+        cursor.execute("""
+            INSERT INTO prices VALUES (?, ?, ?, ?, ?, ?)
+""", (time_now, name, address, postcode, fuel_type, price))
+    conn.commit()
+    conn.close()
+
+def show_results():
+    conn = sqlite3.connect("fuel.db")
+    for row in conn.execute("SELECT * FROM prices LIMIT 5"):
+        print(row)
+
 if __name__ == "__main__":
-    stations = get_all_stations()
-    matches = filter_by_postcode(stations, "SO")
-    for price, address, postcode, name in show_prices(matches, "E10"):
-        print(f"{price:>7}  {name:<40} {postcode}")
+    #stations = get_all_stations()
+    #matches = filter_by_postcode(stations, "SO")
+    #results = show_prices(matches, "E10")
+    #save_results(results, "E10")
+    #for price, address, postcode, name in results:
+    #    print(f"{price:>7}  {name:<40} {postcode}")
+    show_results()
