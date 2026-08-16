@@ -7,10 +7,12 @@
     <th>Price</th>
   </tr>
   {% for recorded_at, name, address, postcode, fuel_type, price in prices %}
-  <tr>
-    <td>{{ name }}</td>
-    <td>{{ postcode }}</td>
-    <td>{{ price }}</td>
-  </tr>
+    <tr>
+      
+      <td><a href="/history?station={{name}}">{{ name }}</a></td>
+      <td>{{ postcode }}</td>
+      <td>{{ price }}</td>
+    </tr>
   {% endfor %}
 </table>
+
