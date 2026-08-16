@@ -99,10 +99,9 @@ def filter_by_postcode(stations, prefix):
             matches.append(station)
     return matches
 
-def show_prices(stations, fuel_type):
+def get_cheapest(stations, fuel_type):
     prices = get_all_prices()
     print(f"stations: {len(stations)}, prices: {len(prices)}")
-    matched = 0
     results = []
     for station in stations:
         for record in prices:
@@ -134,16 +133,44 @@ def save_results(results, fuel_type):
     conn.commit()
     conn.close()
 
-def show_results():
+def print_saved_prices():
     conn = sqlite3.connect("fuel.db")
-    for row in conn.execute("SELECT * FROM prices LIMIT 5"):
+    for row in conn.execute("SELECT * FROM prices"):
         print(row)
+    conn.close()
+
+def get_latest_prices():
+    conn = sqlite3.connect("fuel.db")
+    cursor = conn.execute("""
+        SELECT * FROM prices
+        WHERE recorded_at = (SELECT MAX(recorded_at) FROM prices)
+        ORDER BY price
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def get_station_history(station_name):
+    conn = sqlite3.connect("fuel.db")
+    cursor = conn.execute("""
+        SELECT recorded_at, price FROM prices
+        WHERE station_name = ?
+    """, (station_name,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
 if __name__ == "__main__":
-    #stations = get_all_stations()
-    #matches = filter_by_postcode(stations, "SO")
-    #results = show_prices(matches, "E10")
-    #save_results(results, "E10")
-    #for price, address, postcode, name in results:
-    #    print(f"{price:>7}  {name:<40} {postcode}")
-    show_results()
+    MODE = "fetch"
+
+    if MODE == "fetch":
+        stations = get_all_stations()
+        matches = filter_by_postcode(stations, "SO")
+        results = get_cheapest(matches, "E10")
+        save_results(results, "E10")
+    elif MODE == "latest":
+        for row in get_latest_prices():
+            print(row)
+    elif MODE == "history":
+        for row in get_station_history("COSTCO WHOLESALE SOUTHAMPTON"):
+            print(row)
