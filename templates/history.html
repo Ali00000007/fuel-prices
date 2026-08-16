@@ -7,7 +7,7 @@
   </tr>
   {% for recorded_at, price in prices %}
   <tr>
-    <td>{{ recorded_at }}</td>
+    <td>{{ recorded_at|nicedate }}</td>
     <td>{{ price }}</td>
   </tr>
   {% endfor %}

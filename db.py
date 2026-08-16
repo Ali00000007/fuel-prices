@@ -14,7 +14,7 @@ def save_results(results, fuel_type):
                 price REAL
             )
 """)
-    time_now = datetime.now().isoformat()
+    time_now = datetime.now().isoformat(timespec="seconds")
     for price, address, postcode, name in results:
         cursor.execute("""
             INSERT INTO prices VALUES (?, ?, ?, ?, ?, ?)

@@ -1,7 +1,12 @@
+from datetime import datetime
 from flask import Flask, render_template, request
 from db import get_latest_prices, get_station_history
 
 app = Flask(__name__)
+
+@app.template_filter("nicedate")
+def nicedate(value):
+    return datetime.fromisoformat(value).strftime("%d %b %Y, %H:%M")
 
 @app.route("/")
 def home():
