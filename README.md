@@ -1,8 +1,8 @@
 # UK Fuel Price Tracker
 
-A Python tool that finds the cheapest fuel prices in a given UK postcode area, using the government's Fuel Finder open data API.
+A Python tool that tracks fuel prices across a UK postcode area using the government's Fuel Finder open data API, stores them in SQLite, and serves the results through a small Flask web interface.
 
-Under the Motor Fuel Price (Open Data) Regulations 2025, all UK petrol stations must report their prices to a central service within 30 minutes of any change at the pump. This tool pulls that data, filters it to a postcode area, and ranks stations by price for a chosen fuel type.
+Under the Motor Fuel Price (Open Data) Regulations 2025, all UK petrol stations must report their prices to a central service within 30 minutes of any change at the pump. This project pulls that data, filters it to a postcode area, records it with a timestamp, and lets you view current prices or a single station's price history.
 
 ## What it does
 
@@ -10,15 +10,21 @@ Under the Motor Fuel Price (Open Data) Regulations 2025, all UK petrol stations 
 - Caches the access token and reuses it until close to expiry, as the API guidance requires
 - Pages through all batches of both the station and price endpoints (~8,000 forecourts nationally)
 - Joins the two datasets on each station's `node_id`
-- Filters to a postcode prefix and prints results sorted cheapest first
+- Filters to a postcode prefix and stores results in SQLite with a timestamp
+- Serves a table of current prices and a per-station history page over HTTP
 
-## Example output
+## Project structure
 
 ```
-  153.9  REGENTS PARK ROAD SERVICE STATION        SO15 8SD
-  156.9  TESCO SIZER WAY                          SO40 3TA
-  157.9  E W PINCHBECK & SONS                     SO32 1AB
+main.py           API client, filtering, and the fetch job
+db.py             SQLite connection, schema, and queries
+app.py            Flask web server
+templates/
+  prices.html     Current prices, cheapest first
+  history.html    One station's price over time
 ```
+
+`main.py` writes to the database. `app.py` only reads from it. The two never talk to each other directly, which keeps the fetch job independent of the web server.
 
 ## Requirements
 
@@ -51,11 +57,28 @@ FF_CLIENT_SECRET=your-client-secret
 
 ## Usage
 
+### Fetching prices
+
 ```bash
 python main.py
 ```
 
-The postcode prefix and fuel type are currently set in `main.py`. Edit the call in the `__main__` block to change them.
+Fetches every station and price record, filters to the configured postcode prefix, and appends the results to `fuel.db` with the current timestamp. Takes roughly a minute. Run it repeatedly over days or weeks to build price history.
+
+The postcode prefix and fuel type are set in the `__main__` block of `main.py`. The `MODE` variable there also switches between fetching and printing saved results from the terminal.
+
+### Web interface
+
+```bash
+python app.py
+```
+
+Then open `http://localhost:5000`.
+
+| Route | Shows |
+|-------|-------|
+| `/` | Most recent snapshot, cheapest first |
+| `/history?station=NAME` | One station's recorded prices over time |
 
 ### Fuel type codes
 
@@ -73,23 +96,30 @@ The postcode prefix and fuel type are currently set in `main.py`. Edit the call 
 
 **Pagination.** Both data endpoints require a `batch-number` query parameter starting at 1. The API signals the end of the data with a `404`, not an empty response, so the paging loop catches `requests.HTTPError` and breaks. A maximum batch count guards against an infinite loop.
 
-**Joining.** Prices and station details come from separate endpoints with no location data on the price records and no prices on the station records. They share a `node_id`, which is the join key. The current implementation is a nested loop; building a dictionary keyed on `node_id` would reduce this from O(n²) to O(n) and is the obvious next optimisation.
+**Joining.** Prices and station details come from separate endpoints, with no location data on the price records and no prices on the station records. They share a `node_id`, which is the join key. The current implementation is a nested loop; building a dictionary keyed on `node_id` would reduce this from O(n^2) to O(n) and is the obvious next optimisation.
 
 **Filtering.** Filtering is done on postcode prefix rather than the `city` field. The city data is inconsistent in ways that would silently drop results — values include `EASTLEIGH SOUTHAMPTON`, empty strings, and towns that don't match the station's own address. Postcode prefixes are reliable.
 
+**Storage.** Each run appends a full set of rows tagged with a single ISO 8601 timestamp, rather than updating in place, so the table accumulates history. Timestamps are stored as `TEXT`; ISO 8601 sorts correctly as a string, which is what makes `MAX(recorded_at)` work for finding the latest snapshot.
+
+**Queries.** All parameters are passed using `?` placeholders rather than string formatting, so user-supplied values — including the station name from the web request — can never be interpreted as SQL.
+
 ## Known limitations
 
-- A full run fetches every UK station and price record, which takes around a minute
+- A full run fetches every UK station and price record, which takes around a minute; it cannot run inside a web request
 - Postcode prefix is a coarse geographic filter; the API returns latitude and longitude per station, so distance-based filtering would be more accurate
-- Results are printed and discarded, with no history kept between runs
-- Not all stations stock all fuel types, so a station may be absent from results for one fuel and present for another
+- SQLite is single-file and local, which is fine for one process but would need replacing with Postgres for a deployed multi-process setup
+- Not all stations stock all fuel types, so a station may appear for one fuel and not another
+- The fetch is manual; there is no scheduling yet
 
 ## Planned
 
-- [ ] Store results in SQLite with timestamps to build price history
+- [ ] Link station names on the prices page through to their history
+- [ ] Schedule the fetch so history accumulates automatically
 - [ ] Distance-based filtering using station coordinates
 - [ ] Command-line arguments for postcode, fuel type, and result limit
-- [ ] Web interface with a price history chart
+- [ ] Price history chart
+- [ ] Containerise the web server, fetch job, and database
 
 ## Data source
 
