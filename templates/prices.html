@@ -1,0 +1,16 @@
+<h1>Fuel Prices</h1>
+
+<table>
+  <tr>
+    <th>Station</th>
+    <th>Postcode</th>
+    <th>Price</th>
+  </tr>
+  {% for recorded_at, name, address, postcode, fuel_type, price in prices %}
+  <tr>
+    <td>{{ name }}</td>
+    <td>{{ postcode }}</td>
+    <td>{{ price }}</td>
+  </tr>
+  {% endfor %}
+</table>

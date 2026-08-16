@@ -1,0 +1,14 @@
+<h1>Fuel Station Price History: {{station}}</h1>
+
+<table>
+  <tr>
+    <th>date</th>
+    <th>Price</th>
+  </tr>
+  {% for recorded_at, price in prices %}
+  <tr>
+    <td>{{ recorded_at }}</td>
+    <td>{{ price }}</td>
+  </tr>
+  {% endfor %}
+</table>
