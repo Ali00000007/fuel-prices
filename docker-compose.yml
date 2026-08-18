@@ -1,0 +1,13 @@
+services:
+  fetcher:
+    build: .
+    command: python fetch.py
+    env_file: .env
+    volumes:
+      - ./fuel.db:/app/fuel.db
+  web:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./fuel.db:/app/fuel.db
