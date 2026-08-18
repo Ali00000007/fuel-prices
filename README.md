@@ -1,6 +1,6 @@
 # UK Fuel Price Tracker
 
-Tracks fuel prices across a UK postcode area using the government's Fuel Finder open data API, stores them in SQLite with timestamps, and serves current prices and per-station history through a Flask web interface. Runs in Docker.
+Tracks fuel prices across a UK postcode area using the government's Fuel Finder open data API, stores them in SQLite with timestamps, and serves current prices and per-station history through a Flask web interface. Runs in Docker, deployed to a VPS with a twice-daily scheduled fetch.
 
 Under the Motor Fuel Price (Open Data) Regulations 2025, all UK petrol stations must report their prices to a central service within 30 minutes of any change at the pump. This project pulls that data, filters it to a postcode area, records it, and lets you see what a station charges now and what it has charged over time.
 
@@ -12,7 +12,7 @@ Under the Motor Fuel Price (Open Data) Regulations 2025, all UK petrol stations 
 - Joins the two datasets on each station's `node_id`
 - Filters to a postcode prefix and appends results to SQLite with a UTC timestamp
 - Serves a table of current prices and a per-station history page
-- Runs as two Docker services sharing one database
+- Runs as two Docker services sharing one database, fetched twice daily by cron
 
 ## Project structure
 
@@ -34,7 +34,7 @@ run_fetch.bat        Windows Task Scheduler wrapper for local scheduling
 ## Requirements
 
 - Fuel Finder API credentials (client ID and secret)
-- Docker Desktop, or Python 3.9+ to run it directly
+- Docker, or Python 3.9+ to run it directly
 
 Register as an Information Recipient at the [Fuel Finder Developer Portal](https://www.developer.fuel-finder.service.gov.uk/) using a GOV.UK One Login account. Registration is open to individuals, not just organisations.
 
@@ -52,13 +52,13 @@ FF_CLIENT_SECRET=your-client-secret
 ## Running with Docker
 
 ```bash
-docker compose up              # start the web server
-docker compose run --rm fetcher   # fetch prices once
+docker compose up -d --build       # start the web server
+docker compose run --rm fetcher    # fetch prices once
 ```
 
 Then open `http://localhost:5000`.
 
-The database is mounted as a volume, so data written by the fetcher persists on the host and is visible to the web service immediately. Rebuild with `docker compose up --build` after changing any code — the image is built from a snapshot of the source, so edits are not picked up otherwise.
+The database is mounted as a volume, so data written by the fetcher persists on the host and is visible to the web service immediately. `--build` is required after any code change — the image is built from a snapshot of the source, so edits are not picked up otherwise.
 
 ## Running without Docker
 
@@ -92,6 +92,34 @@ python app.py                 # start the web server
 
 The postcode prefix and fuel type are set in `fetch.py`.
 
+## Deployment
+
+Running on a DigitalOcean droplet (Ubuntu 24.04, 1GB). The steps, in order:
+
+```bash
+apt update && apt upgrade -y
+curl -fsSL https://get.docker.com | sh
+
+git clone https://github.com/Ali00000007/fuel-prices
+cd fuel-prices
+
+nano .env                          # credentials, created by hand — never in git
+touch fuel.db                      # or Docker creates a directory at the mount point
+
+docker compose up -d --build
+docker compose run --rm fetcher    # first run, creates the schema
+```
+
+Scheduling is handled by cron rather than a long-running container, so the fetcher only exists while it is doing work:
+
+```
+0 7,19 * * * cd /root/fuel-prices && docker compose run --rm fetcher >> /root/fetch.log 2>&1
+```
+
+The server runs UTC, so that is 08:00 and 20:00 during BST.
+
+Note that the server holds its own clone of the repo. Pushing from a development machine does not update it — the server needs `git pull` followed by `docker compose up -d --build`.
+
 ## How it works
 
 **Authentication.** A POST to `/api/v1/oauth/generate_access_token` with the client ID and secret as a JSON body returns an access token valid for one hour. The token is cached in module-level state alongside its expiry timestamp; `get_token()` returns the cached value unless it is within 60 seconds of expiring. This matters because a full run makes 30+ requests, and the API documentation explicitly asks callers not to request a new token per call.
@@ -100,29 +128,30 @@ The postcode prefix and fuel type are set in `fetch.py`.
 
 **Joining.** Prices and station details come from separate endpoints — no location data on the price records, no prices on the station records. They share a `node_id`, which is the join key. The current implementation is a nested loop; building a dictionary keyed on `node_id` would reduce this from O(n^2) to O(n) and is the obvious next optimisation.
 
-**Filtering.** Filtering is done on postcode prefix rather than the `city` field. The city data is inconsistent in ways that would silently drop results — values include `EASTLEIGH SOUTHAMPTON`, empty strings, and towns that don't match the station's own address. Postcode prefixes are reliable.
+**Filtering.** Filtering is done on postcode prefix rather than the `city` field. The city data is inconsistent in ways that would silently drop results — values include `EASTLEIGH SOUTHAMPTON`, empty strings, and towns that do not match the station's own address. Postcode prefixes are reliable.
 
-**Timestamps.** Rows are stored as UTC-aware ISO 8601 strings and converted to `Europe/London` for display via a Jinja filter. Storing local time would produce ambiguous data at the BST/GMT transition — an hour that occurs twice in October and one that does not exist in March — and would also mean the same code produced different results on a UTC server than on a UK laptop. ISO 8601 sorts correctly as text, which is what makes `MAX(recorded_at)` work for finding the latest snapshot.
+**Timestamps.** Rows are stored as UTC-aware ISO 8601 strings and converted to `Europe/London` for display via a Jinja filter. Storing local time would produce ambiguous data at the BST/GMT transition — an hour that occurs twice in October and one that does not exist in March. It would also mean the same row rendered differently on a UTC server than on a UK laptop, which is a bug this project actually hit before the timestamps were made timezone-aware. ISO 8601 sorts correctly as text, which is what makes `MAX(recorded_at)` work for finding the latest snapshot.
 
 **Queries.** All parameters are passed using `?` placeholders rather than string formatting, so user-supplied values — including the station name from the web request — can never be interpreted as SQL.
 
-**Containers.** Both services build from the same Dockerfile and differ only in the `command` they run. `requirements.txt` is copied and installed before the application code so that the pip layer stays cached across code changes. The database is mounted as a volume rather than copied into the image, since a container's filesystem is discarded when it stops.
+**Containers.** Both services build from the same Dockerfile and differ only in the `command` they run. `requirements.txt` is copied and installed before the application code so the pip layer stays cached across code changes. The database is mounted as a volume rather than copied into the image, since a container's filesystem is discarded when it stops.
 
 ## Known limitations
 
 - A full run fetches every UK station and price record, taking around a minute; it cannot run inside a web request
-- Postcode prefix is a coarse geographic filter; the API returns latitude and longitude per station, so distance-based filtering would be more accurate
-- SQLite is a single local file, which is fine for one writer but would need replacing with Postgres for a deployed multi-process setup
 - Every run stores a full set of rows even when no price has changed, so the table grows faster than the information in it
-- Scheduling is currently handled outside Docker by Windows Task Scheduler, which only runs while the machine is on
+- Postcode prefix is a coarse geographic filter; the API returns latitude and longitude per station, so distance-based filtering would be more accurate
+- SQLite is a single local file, fine for one writer but would need replacing with Postgres for a multi-process setup
+- Served over HTTP on a bare IP with no domain or TLS
+- Flask's built-in server is used rather than a production WSGI server
 
 ## Planned
 
 - [ ] Only store a row when the price has changed since the last reading
-- [ ] Deploy to a VPS so the fetch runs reliably and history has no gaps
+- [ ] Serve behind Caddy with a domain and automatic HTTPS
+- [ ] Replace Flask's development server with gunicorn
 - [ ] Replace SQLite with Postgres as a third Compose service
 - [ ] Distance-based filtering using station coordinates
-- [ ] Command-line arguments for postcode, fuel type, and result limit
 - [ ] Price history chart
 
 ## Data source
