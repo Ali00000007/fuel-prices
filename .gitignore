@@ -15,3 +15,7 @@ venv/
 
 #database
 *.db
+
+#fetch log
+fetch.log
+*.log
