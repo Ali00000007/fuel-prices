@@ -7,7 +7,17 @@ services:
       - ./fuel.db:/app/fuel.db
   web:
     build: .
-    ports:
-      - "5000:5000"
     volumes:
       - ./fuel.db:/app/fuel.db
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+
+volumes:
+  caddy_data:
