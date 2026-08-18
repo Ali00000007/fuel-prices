@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 def save_results(results, fuel_type):
     conn = sqlite3.connect("fuel.db")
@@ -14,7 +14,7 @@ def save_results(results, fuel_type):
                 price REAL
             )
 """)
-    time_now = datetime.now().isoformat(timespec="seconds")
+    time_now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for price, address, postcode, name in results:
         cursor.execute("""
             INSERT INTO prices VALUES (?, ?, ?, ?, ?, ?)
