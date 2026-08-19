@@ -1,6 +1,8 @@
 # UK Fuel Price Tracker
 
-Tracks fuel prices across a UK postcode area using the government's Fuel Finder open data API, stores them in SQLite with timestamps, and serves current prices and per-station history through a Flask web interface. Runs in Docker, deployed to a VPS with a twice-daily scheduled fetch.
+**Live at [fuel.solenttransfers.co.uk](https://fuel.solenttransfers.co.uk)**
+
+Tracks fuel prices across a UK postcode area using the government's Fuel Finder open data API, stores them in SQLite with timestamps, and serves current prices and per-station history through a Flask web interface. Runs as Docker containers on a VPS behind Caddy, with a twice-daily scheduled fetch.
 
 Under the Motor Fuel Price (Open Data) Regulations 2025, all UK petrol stations must report their prices to a central service within 30 minutes of any change at the pump. This project pulls that data, filters it to a postcode area, records it, and lets you see what a station charges now and what it has charged over time.
 
@@ -12,24 +14,51 @@ Under the Motor Fuel Price (Open Data) Regulations 2025, all UK petrol stations 
 - Joins the two datasets on each station's `node_id`
 - Filters to a postcode prefix and appends results to SQLite with a UTC timestamp
 - Serves a table of current prices and a per-station history page
-- Runs as two Docker services sharing one database, fetched twice daily by cron
+- Runs as three Docker services, fetched twice daily by cron, served over HTTPS
+
+## Architecture
+
+```
+                    internet
+                       │
+                   :443 │ HTTPS
+                       ▼
+              ┌──────────────────┐
+              │      caddy       │   TLS termination, reverse proxy
+              └────────┬─────────┘
+                       │ web:5000  (internal Docker network)
+                       ▼
+              ┌──────────────────┐
+              │       web        │   Flask — reads only
+              └────────┬─────────┘
+                       │
+                  ┌────▼─────┐
+                  │ fuel.db  │      bind-mounted from the host
+                  └────▲─────┘
+                       │
+              ┌────────┴─────────┐
+              │     fetcher      │   run by cron, exits when done
+              └────────┬─────────┘
+                       │
+                Fuel Finder API
+```
+
+`fetcher` writes, `web` reads, and neither imports the other. That separation is what allows them to run as independent services built from the same image.
 
 ## Project structure
 
 ```
-fetch.py             The fetch job — pulls from the API and writes to the database
-main.py              API client, pagination, filtering, and the join
+fetch.py             Entry point for the fetch job
+main.py              API client — auth, pagination, filtering, the join
 db.py                SQLite connection, schema, and queries
 app.py               Flask web server
 templates/
   prices.html        Current prices, cheapest first
   history.html       One station's price over time
-Dockerfile           Image definition, shared by both services
+Dockerfile           Image definition, shared by web and fetcher
 docker-compose.yml   Service definitions
-run_fetch.bat        Windows Task Scheduler wrapper for local scheduling
+Caddyfile            Reverse proxy and TLS configuration
 ```
-
-`fetch.py` writes to the database. `app.py` only reads from it. Neither imports the other, which is what allows them to run as separate services from the same image.
 
 ## Requirements
 
@@ -52,13 +81,14 @@ FF_CLIENT_SECRET=your-client-secret
 ## Running with Docker
 
 ```bash
-docker compose up -d --build       # start the web server
+touch fuel.db                      # must exist, or Docker creates a directory at the mount point
+docker compose up -d --build web   # web only; caddy needs a real domain pointed at the host
 docker compose run --rm fetcher    # fetch prices once
 ```
 
 Then open `http://localhost:5000`.
 
-The database is mounted as a volume, so data written by the fetcher persists on the host and is visible to the web service immediately. `--build` is required after any code change — the image is built from a snapshot of the source, so edits are not picked up otherwise.
+The database is bind-mounted, so data written by the fetcher persists on the host and is visible to the web service immediately. `--build` is required after any code change — `COPY . .` snapshots the source at build time, so edits are not picked up otherwise.
 
 ## Running without Docker
 
@@ -94,7 +124,7 @@ The postcode prefix and fuel type are set in `fetch.py`.
 
 ## Deployment
 
-Running on a DigitalOcean droplet (Ubuntu 24.04, 1GB). The steps, in order:
+Running on a DigitalOcean droplet (Ubuntu 24.04, 1 vCPU, 1GB), reached over SSH with key authentication.
 
 ```bash
 apt update && apt upgrade -y
@@ -104,13 +134,17 @@ git clone https://github.com/Ali00000007/fuel-prices
 cd fuel-prices
 
 nano .env                          # credentials, created by hand — never in git
-touch fuel.db                      # or Docker creates a directory at the mount point
+touch fuel.db                      # bind-mount targets must exist first
 
 docker compose up -d --build
-docker compose run --rm fetcher    # first run, creates the schema
+docker compose run --rm fetcher    # first run creates the schema
 ```
 
-Scheduling is handled by cron rather than a long-running container, so the fetcher only exists while it is doing work:
+An A record points `fuel.solenttransfers.co.uk` at the droplet's IP. Caddy handles TLS — it requests a Let's Encrypt certificate on first start, renews automatically, and redirects HTTP to HTTPS. The certificate is kept in a named volume so restarts do not trigger a re-request, which matters because Let's Encrypt rate-limits.
+
+Only Caddy exposes ports. The Flask service has no `ports:` block at all and is reachable solely through the internal Docker network, so there is no way to bypass TLS.
+
+Scheduling uses cron rather than a long-running container, so the fetcher exists only while it is working:
 
 ```
 0 7,19 * * * cd /root/fuel-prices && docker compose run --rm fetcher >> /root/fetch.log 2>&1
@@ -118,11 +152,13 @@ Scheduling is handled by cron rather than a long-running container, so the fetch
 
 The server runs UTC, so that is 08:00 and 20:00 during BST.
 
-Note that the server holds its own clone of the repo. Pushing from a development machine does not update it — the server needs `git pull` followed by `docker compose up -d --build`.
+The server holds its own clone of the repo, and pushing from a development machine does not update it. Deploying a change means `git pull` followed by `docker compose up -d --build` on the server.
 
 ## How it works
 
-**Authentication.** A POST to `/api/v1/oauth/generate_access_token` with the client ID and secret as a JSON body returns an access token valid for one hour. The token is cached in module-level state alongside its expiry timestamp; `get_token()` returns the cached value unless it is within 60 seconds of expiring. This matters because a full run makes 30+ requests, and the API documentation explicitly asks callers not to request a new token per call.
+**Finding the API.** The developer portal documents the request format and endpoint paths but never states the host, and the OpenAPI spec has no `servers` block. The base URL was inferred from the pattern of the portal's own sign-out link, which sits at `/onelogin/api/v1/auth/logout` on the service domain, and confirmed by a successful token request.
+
+**Authentication.** A POST to `/api/v1/oauth/generate_access_token` with the client ID and secret as a JSON body returns an access token valid for one hour. The published authentication guidance describes a form-encoded body with a `scope` parameter; the OpenAPI spec, which is correct, specifies JSON with only the two credentials. The token is cached in module-level state alongside its expiry timestamp, and `get_token()` returns the cached value unless it is within 60 seconds of expiring. This matters because a full run makes 30+ requests, and the documentation explicitly asks callers not to request a new token per call.
 
 **Pagination.** Both data endpoints require a `batch-number` query parameter starting at 1. The API signals the end of the data with a `404` rather than an empty response, so the paging loop catches `requests.HTTPError` and breaks. A maximum batch count guards against an infinite loop.
 
@@ -130,27 +166,27 @@ Note that the server holds its own clone of the repo. Pushing from a development
 
 **Filtering.** Filtering is done on postcode prefix rather than the `city` field. The city data is inconsistent in ways that would silently drop results — values include `EASTLEIGH SOUTHAMPTON`, empty strings, and towns that do not match the station's own address. Postcode prefixes are reliable.
 
-**Timestamps.** Rows are stored as UTC-aware ISO 8601 strings and converted to `Europe/London` for display via a Jinja filter. Storing local time would produce ambiguous data at the BST/GMT transition — an hour that occurs twice in October and one that does not exist in March. It would also mean the same row rendered differently on a UTC server than on a UK laptop, which is a bug this project actually hit before the timestamps were made timezone-aware. ISO 8601 sorts correctly as text, which is what makes `MAX(recorded_at)` work for finding the latest snapshot.
+**Timestamps.** Rows are stored as UTC-aware ISO 8601 strings and converted to `Europe/London` for display via a Jinja filter. Storing local time would produce ambiguous data at the BST/GMT transition — an hour that occurs twice in October and one that does not exist in March. It would also mean the same row rendered differently on a UTC server than on a UK laptop, which is a bug this project hit before the timestamps were made timezone-aware. ISO 8601 sorts correctly as text, which is what makes `MAX(recorded_at)` work for finding the latest snapshot.
 
-**Queries.** All parameters are passed using `?` placeholders rather than string formatting, so user-supplied values — including the station name from the web request — can never be interpreted as SQL.
+**Queries.** All parameters are passed using `?` placeholders rather than string formatting, so user-supplied values — including the station name arriving from the web request — can never be interpreted as SQL.
 
-**Containers.** Both services build from the same Dockerfile and differ only in the `command` they run. `requirements.txt` is copied and installed before the application code so the pip layer stays cached across code changes. The database is mounted as a volume rather than copied into the image, since a container's filesystem is discarded when it stops.
+**Containers.** `web` and `fetcher` build from the same Dockerfile and differ only in the `command` they run, so there is one environment definition rather than two to keep in step. `requirements.txt` is copied and installed before the application code so the pip layer stays cached across code changes. The database is bind-mounted rather than copied into the image, since a container's filesystem is discarded when it stops.
 
 ## Known limitations
 
 - A full run fetches every UK station and price record, taking around a minute; it cannot run inside a web request
 - Every run stores a full set of rows even when no price has changed, so the table grows faster than the information in it
 - Postcode prefix is a coarse geographic filter; the API returns latitude and longitude per station, so distance-based filtering would be more accurate
-- SQLite is a single local file, fine for one writer but would need replacing with Postgres for a multi-process setup
-- Served over HTTP on a bare IP with no domain or TLS
-- Flask's built-in server is used rather than a production WSGI server
+- SQLite is a single local file with no backup; losing the droplet would lose the price history
+- Flask's built-in development server is used rather than a production WSGI server
+- Containers have no restart policy, so a host reboot requires starting them manually
 
 ## Planned
 
 - [ ] Only store a row when the price has changed since the last reading
-- [ ] Serve behind Caddy with a domain and automatic HTTPS
 - [ ] Replace Flask's development server with gunicorn
-- [ ] Replace SQLite with Postgres as a third Compose service
+- [ ] Add restart policies and back up the database off the droplet
+- [ ] Replace SQLite with Postgres as a fourth Compose service
 - [ ] Distance-based filtering using station coordinates
 - [ ] Price history chart
 
